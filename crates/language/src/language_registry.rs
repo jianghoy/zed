@@ -6,7 +6,6 @@ use anyhow::{anyhow, Context as _, Result};
 use collections::{hash_map, HashMap};
 use futures::{
     channel::{mpsc, oneshot},
-    executor,
     future::Shared,
     FutureExt as _, TryFutureExt as _,
 };
@@ -348,7 +347,11 @@ impl LanguageRegistry {
                     (pattern.is_match(&text), 0)
                 },
             );
-            path_matches || content_matches
+            if path_matches.0 {
+                path_matches
+            } else {
+                content_matches
+            }
         })
     }
 
@@ -364,11 +367,7 @@ impl LanguageRegistry {
             .available_languages
             .iter()
             .filter_map(|l| {
-                let (matched, score) = if l.loaded {
-                    callback(l.config.name.as_ref(), &l.config.matcher)
-                } else {
-                    callback(&l.name, &l.matcher)
-                };
+                let (matched, score) = callback(&l.name, &l.matcher);
                 if matched {
                     Some((l.clone(), score))
                 } else {
