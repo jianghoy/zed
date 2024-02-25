@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context as _, Result};
 use collections::{hash_map, HashMap};
 use futures::{
     channel::{mpsc, oneshot},
+    executor,
     future::Shared,
     FutureExt as _, TryFutureExt as _,
 };
@@ -293,7 +294,7 @@ impl LanguageRegistry {
         name: &str,
     ) -> UnwrapFuture<oneshot::Receiver<Result<Arc<Language>>>> {
         let name = UniCase::new(name);
-        self.get_or_load_language(|language_name, _| UniCase::new(language_name) == name)
+        self.get_or_load_language(|language_name, _| (UniCase::new(language_name) == name, 0))
     }
 
     pub fn language_for_name_or_extension(
@@ -302,11 +303,17 @@ impl LanguageRegistry {
     ) -> UnwrapFuture<oneshot::Receiver<Result<Arc<Language>>>> {
         let string = UniCase::new(string);
         self.get_or_load_language(|name, config| {
-            UniCase::new(name) == string
-                || config
-                    .path_suffixes
-                    .iter()
-                    .any(|suffix| UniCase::new(suffix) == string)
+            if UniCase::new(name) == string {
+                (true, 0)
+            } else {
+                (
+                    config
+                        .path_suffixes
+                        .iter()
+                        .any(|suffix| UniCase::new(suffix) == string),
+                    0,
+                )
+            }
         })
     }
 
@@ -323,14 +330,22 @@ impl LanguageRegistry {
             let path_matches = config
                 .path_suffixes
                 .iter()
-                .any(|suffix| path_suffixes.contains(&Some(suffix.as_str())));
+                .filter_map(|suffix| {
+                    if path_suffixes.contains(&Some(suffix.as_str())) {
+                        Some(suffix.len())
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .map_or((false, 0), |max_length| (true, max_length as i16));
             let content_matches = content.zip(config.first_line_pattern.as_ref()).map_or(
-                false,
+                (false, 0),
                 |(content, pattern)| {
                     let end = content.clip_point(Point::new(0, 256), Bias::Left);
                     let end = content.point_to_offset(end);
                     let text = content.chunks_in_range(0..end).collect::<String>();
-                    pattern.is_match(&text)
+                    (pattern.is_match(&text), 0)
                 },
             );
             path_matches || content_matches
@@ -339,24 +354,38 @@ impl LanguageRegistry {
 
     fn get_or_load_language(
         self: &Arc<Self>,
-        callback: impl Fn(&str, &LanguageMatcher) -> bool,
+        callback: impl Fn(&str, &LanguageMatcher) -> (bool, i16),
     ) -> UnwrapFuture<oneshot::Receiver<Result<Arc<Language>>>> {
         let (tx, rx) = oneshot::channel();
 
         let mut state = self.state.write();
-        if let Some(language) = state
-            .languages
+
+        if let Some((language, _)) = state
+            .available_languages
             .iter()
-            .find(|language| callback(language.config.name.as_ref(), &language.config.matcher))
+            .filter_map(|l| {
+                let (matched, score) = if l.loaded {
+                    callback(l.config.name.as_ref(), &l.config.matcher)
+                } else {
+                    callback(&l.name, &l.matcher)
+                };
+                if matched {
+                    Some((l.clone(), score))
+                } else {
+                    None
+                }
+            })
+            .max_by(|(l1, score1), (l2, score2)| {
+                // bigger score comes first; if tie, then loaded comes first.
+                match score2.cmp(score1) {
+                    std::cmp::Ordering::Equal => l2.loaded.cmp(&l1.loaded),
+                    other => other,
+                }
+            })
         {
-            let _ = tx.send(Ok(language.clone()));
-        } else if let Some(executor) = self.executor.clone() {
-            if let Some(language) = state
-                .available_languages
-                .iter()
-                .rfind(|l| !l.loaded && callback(&l.name, &l.matcher))
-                .cloned()
-            {
+            if language.loaded {
+                let _ = tx.send(Ok(language.clone()));
+            } else if let Some(executor) = self.executor.clone() {
                 match state.loading_languages.entry(language.id) {
                     hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(tx),
                     hash_map::Entry::Vacant(entry) => {
@@ -415,10 +444,10 @@ impl LanguageRegistry {
                     }
                 }
             } else {
-                let _ = tx.send(Err(anyhow!("language not found")));
+                let _ = tx.send(Err(anyhow!("executor does not exist")));
             }
         } else {
-            let _ = tx.send(Err(anyhow!("executor does not exist")));
+            let _ = tx.send(Err(anyhow!("language not found")));
         }
 
         rx.unwrap()
