@@ -363,94 +363,111 @@ impl LanguageRegistry {
 
         let mut state = self.state.write();
 
-        if let Some((language, _)) = state
+        let unloaded_language_option = state
             .available_languages
             .iter()
             .filter_map(|l| {
                 let (matched, score) = callback(&l.name, &l.matcher);
-                if matched {
-                    Some((l.clone(), score))
+                if matched { Some((l.clone(), score)) } else { None }
+            })
+            .max_by_key(|(_, score)| *score);
+        let language_option = state
+            .languages
+            .iter()
+            .filter_map(|language| {
+                let (matched, score) = callback(language.config.name.as_ref(), &language.config.matcher);
+                if matched { Some((language.clone(), score)) } else { None }
+            })
+            .max_by_key(|(_, score)| *score);
+
+        match (unloaded_language_option, language_option) {
+            (Some((unloaded_language, unloaded_language_score)), Some((language, language_score))) => {
+                if unloaded_language_score > language_score {
+                    load_language(unloaded_language, tx, state);
                 } else {
-                    None
+                    let _ = tx.send(Ok(language.clone()));
                 }
-            })
-            .max_by(|(l1, score1), (l2, score2)| {
-                // bigger score comes first; if tie, then loaded comes first.
-                match score2.cmp(score1) {
-                    std::cmp::Ordering::Equal => l2.loaded.cmp(&l1.loaded),
-                    other => other,
-                }
-            })
-        {
-            if language.loaded {
+            },
+            (Some((unloaded_language, unloaded_language_score)), None) => {
+                load_language(unloaded_language, tx, state);
+            },
+            (None, Some((language, language_score))) => {
                 let _ = tx.send(Ok(language.clone()));
-            } else if let Some(executor) = self.executor.clone() {
-                match state.loading_languages.entry(language.id) {
-                    hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(tx),
-                    hash_map::Entry::Vacant(entry) => {
-                        let this = self.clone();
-                        executor
-                            .spawn(async move {
-                                let id = language.id;
-                                let name = language.name.clone();
-                                let language = async {
-                                    let (config, queries) = (language.load)()?;
+            },
+            (None, None) => {
+                let _ = tx.send(Err(anyhow!("language not found")));
+            },
+        }
+        rx.unwrap()
 
-                                    let grammar = if let Some(grammar) = config.grammar.clone() {
-                                        Some(this.get_or_load_grammar(grammar).await?)
-                                    } else {
-                                        None
-                                    };
+    }
+    fn load_language(self: &Arc<Self>,
+        language: AvailableLanguage,
+        tx: oneshot::Sender<Result<Arc<Language>>>,
+        state: ) -> Result<Arc<Language>> {
+        if let Some(executor) = self.executor.clone() {
+            match state.loading_languages.entry(language.id) {
+                hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(tx),
+                hash_map::Entry::Vacant(entry) => {
+                    let this = self.clone();
+                    executor
+                        .spawn(async move {
+                            let id = language.id;
+                            let name = language.name.clone();
+                            let language = async {
+                                let (config, queries) = (unloaded_language.load)()?;
 
-                                    Language::new_with_id(id, config, grammar)
-                                        .with_lsp_adapters(language.lsp_adapters)
-                                        .await
-                                        .with_queries(queries)
-                                }
-                                .await;
-
-                                match language {
-                                    Ok(language) => {
-                                        let language = Arc::new(language);
-                                        let mut state = this.state.write();
-
-                                        state.add(language.clone());
-                                        state.mark_language_loaded(id);
-                                        if let Some(mut txs) = state.loading_languages.remove(&id) {
-                                            for tx in txs.drain(..) {
-                                                let _ = tx.send(Ok(language.clone()));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("failed to load language {name}:\n{:?}", e);
-                                        let mut state = this.state.write();
-                                        state.mark_language_loaded(id);
-                                        if let Some(mut txs) = state.loading_languages.remove(&id) {
-                                            for tx in txs.drain(..) {
-                                                let _ = tx.send(Err(anyhow!(
-                                                    "failed to load language {}: {}",
-                                                    name,
-                                                    e
-                                                )));
-                                            }
-                                        }
-                                    }
+                                let grammar = if let Some(grammar) = config.grammar.clone() {
+                                    Some(this.get_or_load_grammar(grammar).await?)
+                                } else {
+                                    None
                                 };
-                            })
-                            .detach();
-                        entry.insert(vec![tx]);
-                    }
+
+                                Language::new_with_id(id, config, grammar)
+                                    .with_lsp_adapters(language.lsp_adapters)
+                                    .await
+                                    .with_queries(queries)
+                            }
+                            .await;
+
+                            match language {
+                                Ok(language) => {
+                                    let language = Arc::new(language);
+                                    let mut state = this.state.write();
+
+                                    state.add(language.clone());
+                                    state.mark_language_loaded(id);
+                                    if let Some(mut txs) = state.loading_languages.remove(&id) {
+                                        for tx in txs.drain(..) {
+                                            let _ = tx.send(Ok(language.clone()));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("failed to load language {name}:\n{:?}", e);
+                                    let mut state = this.state.write();
+                                    state.mark_language_loaded(id);
+                                    if let Some(mut txs) = state.loading_languages.remove(&id) {
+                                        for tx in txs.drain(..) {
+                                            let _ = tx.send(Err(anyhow!(
+                                                "failed to load language {}: {}",
+                                                name,
+                                                e
+                                            )));
+                                        }
+                                    }
+                                }
+                            };
+                        })
+                        .detach();
+                    entry.insert(vec![tx]);
                 }
-            } else {
-                let _ = tx.send(Err(anyhow!("executor does not exist")));
             }
         } else {
-            let _ = tx.send(Err(anyhow!("language not found")));
+            let _ = tx.send(Err(anyhow!("executor does not exist")));
         }
-
-        rx.unwrap()
     }
+
 
     fn get_or_load_grammar(
         self: &Arc<Self>,
