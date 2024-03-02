@@ -1,6 +1,6 @@
 use client::telemetry::Telemetry;
 use editor::{Editor, EditorElement, EditorStyle};
-use extension::{Extension, ExtensionStatus, ExtensionStore};
+use extension::{ExtensionApiResponse, ExtensionStatus, ExtensionStore};
 use gpui::{
     actions, canvas, uniform_list, AnyElement, AppContext, AvailableSpace, EventEmitter,
     FocusableView, FontStyle, FontWeight, InteractiveElement, KeyContext, ParentElement, Render,
@@ -24,7 +24,7 @@ pub fn init(cx: &mut AppContext) {
     cx.observe_new_views(move |workspace: &mut Workspace, _cx| {
         workspace.register_action(move |workspace, _: &Extensions, cx| {
             let extensions_page = ExtensionsPage::new(workspace, cx);
-            workspace.add_item(Box::new(extensions_page), cx)
+            workspace.add_item_to_active_pane(Box::new(extensions_page), cx)
         });
     })
     .detach();
@@ -42,7 +42,7 @@ pub struct ExtensionsPage {
     telemetry: Arc<Telemetry>,
     is_fetching_extensions: bool,
     filter: ExtensionFilter,
-    extension_entries: Vec<Extension>,
+    extension_entries: Vec<ExtensionApiResponse>,
     query_editor: View<Editor>,
     query_contains_error: bool,
     _subscription: gpui::Subscription,
@@ -55,7 +55,11 @@ impl ExtensionsPage {
             let store = ExtensionStore::global(cx);
             let subscription = cx.observe(&store, |_, _, cx| cx.notify());
 
-            let query_editor = cx.new_view(|cx| Editor::single_line(cx));
+            let query_editor = cx.new_view(|cx| {
+                let mut input = Editor::single_line(cx);
+                input.set_placeholder_text("Search extensions...", cx);
+                input
+            });
             cx.subscribe(&query_editor, Self::on_query_change).detach();
 
             let mut this = Self {
@@ -74,7 +78,7 @@ impl ExtensionsPage {
         })
     }
 
-    fn filtered_extension_entries(&self, cx: &mut ViewContext<Self>) -> Vec<Extension> {
+    fn filtered_extension_entries(&self, cx: &mut ViewContext<Self>) -> Vec<ExtensionApiResponse> {
         let extension_store = ExtensionStore::global(cx).read(cx);
 
         self.extension_entries
@@ -150,7 +154,7 @@ impl ExtensionsPage {
             .collect()
     }
 
-    fn render_entry(&self, extension: &Extension, cx: &mut ViewContext<Self>) -> Div {
+    fn render_entry(&self, extension: &ExtensionApiResponse, cx: &mut ViewContext<Self>) -> Div {
         let status = ExtensionStore::global(cx)
             .read(cx)
             .extension_status(&extension.id);
@@ -464,64 +468,73 @@ impl Render for ExtensionsPage {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
-            .p_4()
-            .gap_4()
             .bg(cx.theme().colors().editor_background)
             .child(
-                h_flex()
-                    .w_full()
-                    .child(Headline::new("Extensions").size(HeadlineSize::XLarge)),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(h_flex().child(self.render_search(cx)))
+                v_flex()
+                    .gap_4()
+                    .p_4()
+                    .border_b()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().editor_background)
                     .child(
                         h_flex()
+                            .w_full()
+                            .child(Headline::new("Extensions").size(HeadlineSize::XLarge)),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .justify_between()
+                            .child(h_flex().child(self.render_search(cx)))
                             .child(
-                                ToggleButton::new("filter-all", "All")
-                                    .style(ButtonStyle::Filled)
-                                    .size(ButtonSize::Large)
-                                    .selected(self.filter == ExtensionFilter::All)
-                                    .on_click(cx.listener(|this, _event, _cx| {
-                                        this.filter = ExtensionFilter::All;
-                                    }))
-                                    .tooltip(move |cx| Tooltip::text("Show all extensions", cx))
-                                    .first(),
-                            )
-                            .child(
-                                ToggleButton::new("filter-installed", "Installed")
-                                    .style(ButtonStyle::Filled)
-                                    .size(ButtonSize::Large)
-                                    .selected(self.filter == ExtensionFilter::Installed)
-                                    .on_click(cx.listener(|this, _event, _cx| {
-                                        this.filter = ExtensionFilter::Installed;
-                                    }))
-                                    .tooltip(move |cx| {
-                                        Tooltip::text("Show installed extensions", cx)
-                                    })
-                                    .middle(),
-                            )
-                            .child(
-                                ToggleButton::new("filter-not-installed", "Not Installed")
-                                    .style(ButtonStyle::Filled)
-                                    .size(ButtonSize::Large)
-                                    .selected(self.filter == ExtensionFilter::NotInstalled)
-                                    .on_click(cx.listener(|this, _event, _cx| {
-                                        this.filter = ExtensionFilter::NotInstalled;
-                                    }))
-                                    .tooltip(move |cx| {
-                                        Tooltip::text("Show not installed extensions", cx)
-                                    })
-                                    .last(),
+                                h_flex()
+                                    .child(
+                                        ToggleButton::new("filter-all", "All")
+                                            .style(ButtonStyle::Filled)
+                                            .size(ButtonSize::Large)
+                                            .selected(self.filter == ExtensionFilter::All)
+                                            .on_click(cx.listener(|this, _event, _cx| {
+                                                this.filter = ExtensionFilter::All;
+                                            }))
+                                            .tooltip(move |cx| {
+                                                Tooltip::text("Show all extensions", cx)
+                                            })
+                                            .first(),
+                                    )
+                                    .child(
+                                        ToggleButton::new("filter-installed", "Installed")
+                                            .style(ButtonStyle::Filled)
+                                            .size(ButtonSize::Large)
+                                            .selected(self.filter == ExtensionFilter::Installed)
+                                            .on_click(cx.listener(|this, _event, _cx| {
+                                                this.filter = ExtensionFilter::Installed;
+                                            }))
+                                            .tooltip(move |cx| {
+                                                Tooltip::text("Show installed extensions", cx)
+                                            })
+                                            .middle(),
+                                    )
+                                    .child(
+                                        ToggleButton::new("filter-not-installed", "Not Installed")
+                                            .style(ButtonStyle::Filled)
+                                            .size(ButtonSize::Large)
+                                            .selected(self.filter == ExtensionFilter::NotInstalled)
+                                            .on_click(cx.listener(|this, _event, _cx| {
+                                                this.filter = ExtensionFilter::NotInstalled;
+                                            }))
+                                            .tooltip(move |cx| {
+                                                Tooltip::text("Show not installed extensions", cx)
+                                            })
+                                            .last(),
+                                    ),
                             ),
                     ),
             )
-            .child(v_flex().size_full().overflow_y_hidden().map(|this| {
+            .child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {
                 let entries = self.filtered_extension_entries(cx);
                 if entries.is_empty() {
-                    return this.child(self.render_empty_state(cx));
+                    return this.py_4().child(self.render_empty_state(cx));
                 }
 
                 this.child(
@@ -537,6 +550,7 @@ impl Render for ExtensionsPage {
                                 Self::render_extensions,
                             )
                             .size_full()
+                            .pb_4()
                             .track_scroll(scroll_handle)
                             .into_any_element()
                             .draw(
