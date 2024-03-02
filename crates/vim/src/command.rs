@@ -201,6 +201,34 @@ pub fn command_interceptor(mut query: &str, cx: &AppContext) -> Option<CommandIn
             }
             .boxed_clone(),
         ),
+        "tabo" | "tabon" | "tabonl" | "tabonly" => (
+            "tabonly",
+            workspace::CloseInactiveItems {
+                save_intent: Some(SaveIntent::Close),
+            }
+            .boxed_clone(),
+        ),
+        "tabo!" | "tabon!" | "tabonl!" | "tabonly!" => (
+            "tabonly!",
+            workspace::CloseInactiveItems {
+                save_intent: Some(SaveIntent::Skip),
+            }
+            .boxed_clone(),
+        ),
+        "on" | "onl" | "only" => (
+            "only",
+            workspace::CloseInactiveTabsAndPanes {
+                save_intent: Some(SaveIntent::Close),
+            }
+            .boxed_clone(),
+        ),
+        "on!" | "onl!" | "only!" => (
+            "only!",
+            workspace::CloseInactiveTabsAndPanes {
+                save_intent: Some(SaveIntent::Skip),
+            }
+            .boxed_clone(),
+        ),
 
         // quickfix / loclist (merged together for now)
         "cl" | "cli" | "clis" | "clist" => (
@@ -462,9 +490,7 @@ mod test {
 
         assert_eq!(fs.load(&path).await.unwrap(), "@\n");
 
-        fs.as_fake()
-            .write_file_internal(path, "oops\n".to_string())
-            .unwrap();
+        fs.as_fake().insert_file(path, b"oops\n".to_vec()).await;
 
         // conflict!
         cx.simulate_keystrokes(["i", "@", "escape"]);
