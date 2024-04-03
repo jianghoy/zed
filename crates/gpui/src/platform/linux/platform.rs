@@ -4,11 +4,13 @@ use std::cell::RefCell;
 use std::env;
 use std::{
     path::{Path, PathBuf},
+    process::Command,
     rc::Rc,
     sync::Arc,
     time::Duration,
 };
 
+use anyhow::anyhow;
 use ashpd::desktop::file_chooser::{OpenFileRequest, SaveFileRequest};
 use async_task::Runnable;
 use calloop::{EventLoop, LoopHandle, LoopSignal};
@@ -21,13 +23,20 @@ use wayland_client::Connection;
 use crate::platform::linux::client::Client;
 use crate::platform::linux::wayland::WaylandClient;
 use crate::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
-    ForegroundExecutor, Keymap, LinuxDispatcher, LinuxTextSystem, Menu, PathPromptOptions,
+    px, Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
+    ForegroundExecutor, Keymap, LinuxDispatcher, LinuxTextSystem, Menu, PathPromptOptions, Pixels,
     Platform, PlatformDisplay, PlatformInput, PlatformTextSystem, PlatformWindow, Result,
-    SemanticVersion, Task, WindowOptions,
+    SemanticVersion, Task, WindowOptions, WindowParams,
 };
 
 use super::x11::X11Client;
+
+pub(super) const SCROLL_LINES: f64 = 3.0;
+
+// Values match the defaults on GTK.
+// Taken from https://github.com/GNOME/gtk/blob/main/gtk/gtksettings.c#L320
+pub(super) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+pub(super) const DOUBLE_CLICK_DISTANCE: Pixels = px(5.0);
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -66,7 +75,7 @@ impl Default for LinuxPlatform {
 impl LinuxPlatform {
     pub(crate) fn new() -> Self {
         let wayland_display = env::var_os("WAYLAND_DISPLAY");
-        let use_wayland = wayland_display.is_some() && !wayland_display.unwrap().is_empty();
+        let use_wayland = wayland_display.is_some_and(|display| !display.is_empty());
 
         let (main_sender, main_receiver) = calloop::channel::channel::<Runnable>();
         let text_system = Arc::new(LinuxTextSystem::new());
@@ -107,6 +116,8 @@ impl LinuxPlatform {
     }
 }
 
+const KEYRING_LABEL: &str = "zed-github-account";
+
 impl Platform for LinuxPlatform {
     fn background_executor(&self) -> BackgroundExecutor {
         self.inner.background_executor.clone()
@@ -138,8 +149,44 @@ impl Platform for LinuxPlatform {
         self.inner.loop_signal.stop();
     }
 
-    // todo(linux)
-    fn restart(&self) {}
+    fn restart(&self) {
+        use std::os::unix::process::CommandExt as _;
+
+        // get the process id of the current process
+        let app_pid = std::process::id().to_string();
+        // get the path to the executable
+        let app_path = match self.app_path() {
+            Ok(path) => path,
+            Err(err) => {
+                log::error!("Failed to get app path: {:?}", err);
+                return;
+            }
+        };
+
+        // script to wait for the current process to exit  and then restart the app
+        let script = format!(
+            r#"
+            while kill -O {pid} 2>/dev/null; do
+                sleep 0.1
+            done
+            {app_path}
+            "#,
+            pid = app_pid,
+            app_path = app_path.display()
+        );
+
+        // execute the script using /bin/bash
+        let restart_process = Command::new("/bin/bash")
+            .arg("-c")
+            .arg(script)
+            .process_group(0)
+            .spawn();
+
+        match restart_process {
+            Ok(_) => self.quit(),
+            Err(e) => log::error!("failed to spawn restart script: {:?}", e),
+        }
+    }
 
     // todo(linux)
     fn activate(&self, ignoring_other_apps: bool) {}
@@ -152,6 +199,10 @@ impl Platform for LinuxPlatform {
 
     // todo(linux)
     fn unhide_other_apps(&self) {}
+
+    fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
+        self.client.primary_display()
+    }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         self.client.displays()
@@ -169,7 +220,7 @@ impl Platform for LinuxPlatform {
     fn open_window(
         &self,
         handle: AnyWindowHandle,
-        options: WindowOptions,
+        options: WindowParams,
     ) -> Box<dyn PlatformWindow> {
         self.client.open_window(handle, options)
     }
@@ -301,28 +352,18 @@ impl Platform for LinuxPlatform {
         "Linux"
     }
 
-    fn double_click_interval(&self) -> Duration {
-        Duration::default()
-    }
-
     fn os_version(&self) -> Result<SemanticVersion> {
-        Ok(SemanticVersion {
-            major: 1,
-            minor: 0,
-            patch: 0,
-        })
+        Ok(SemanticVersion::new(1, 0, 0))
     }
 
     fn app_version(&self) -> Result<SemanticVersion> {
-        Ok(SemanticVersion {
-            major: 1,
-            minor: 0,
-            patch: 0,
-        })
+        Ok(SemanticVersion::new(1, 0, 0))
     }
 
     fn app_path(&self) -> Result<PathBuf> {
-        unimplemented!()
+        // get the path of the executable of the current process
+        let exe_path = std::env::current_exe()?;
+        Ok(exe_path)
     }
 
     // todo(linux)
@@ -332,40 +373,111 @@ impl Platform for LinuxPlatform {
         UtcOffset::UTC
     }
 
+    //todo(linux)
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf> {
-        unimplemented!()
+        Err(anyhow::Error::msg(
+            "Platform<LinuxPlatform>::path_for_auxiliary_executable is not implemented yet",
+        ))
     }
 
-    // todo(linux)
-    fn set_cursor_style(&self, style: CursorStyle) {}
+    fn set_cursor_style(&self, style: CursorStyle) {
+        self.client.set_cursor_style(style)
+    }
 
     // todo(linux)
     fn should_auto_hide_scrollbars(&self) -> bool {
         false
     }
 
-    // todo(linux)
-    fn write_to_clipboard(&self, item: ClipboardItem) {}
+    fn write_to_clipboard(&self, item: ClipboardItem) {
+        let clipboard = self.client.get_clipboard();
+        clipboard.borrow_mut().set_contents(item.text);
+    }
 
-    // todo(linux)
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        None
+        let clipboard = self.client.get_clipboard();
+        let contents = clipboard.borrow_mut().get_contents();
+        match contents {
+            Ok(text) => Some(ClipboardItem {
+                metadata: None,
+                text,
+            }),
+            _ => None,
+        }
     }
 
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
-        unimplemented!()
+        let url = url.to_string();
+        let username = username.to_string();
+        let password = password.to_vec();
+        self.background_executor().spawn(async move {
+            let keyring = oo7::Keyring::new().await?;
+            keyring.unlock().await?;
+            keyring
+                .create_item(
+                    KEYRING_LABEL,
+                    &vec![("url", &url), ("username", &username)],
+                    password,
+                    true,
+                )
+                .await?;
+            Ok(())
+        })
     }
 
+    //todo(linux): add trait methods for accessing the primary selection
     fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        unimplemented!()
+        let url = url.to_string();
+        self.background_executor().spawn(async move {
+            let keyring = oo7::Keyring::new().await?;
+            keyring.unlock().await?;
+
+            let items = keyring.search_items(&vec![("url", &url)]).await?;
+
+            for item in items.into_iter() {
+                if item.label().await.is_ok_and(|label| label == KEYRING_LABEL) {
+                    let attributes = item.attributes().await?;
+                    let username = attributes
+                        .get("username")
+                        .ok_or_else(|| anyhow!("Cannot find username in stored credentials"))?;
+                    let secret = item.secret().await?;
+
+                    // we lose the zeroizing capabilities at this boundary,
+                    // a current limitation GPUI's credentials api
+                    return Ok(Some((username.to_string(), secret.to_vec())));
+                } else {
+                    continue;
+                }
+            }
+            Ok(None)
+        })
     }
 
     fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
-        unimplemented!()
+        let url = url.to_string();
+        self.background_executor().spawn(async move {
+            let keyring = oo7::Keyring::new().await?;
+            keyring.unlock().await?;
+
+            let items = keyring.search_items(&vec![("url", &url)]).await?;
+
+            for item in items.into_iter() {
+                if item.label().await.is_ok_and(|label| label == KEYRING_LABEL) {
+                    item.delete().await?;
+                    return Ok(());
+                }
+            }
+
+            Ok(())
+        })
     }
 
     fn window_appearance(&self) -> crate::WindowAppearance {
         crate::WindowAppearance::Light
+    }
+
+    fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
+        Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
     }
 }
 

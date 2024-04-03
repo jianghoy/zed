@@ -13,7 +13,7 @@ use language::{
 };
 use lsp::FakeLanguageServer;
 use pretty_assertions::assert_eq;
-use project::{search::SearchQuery, Project, ProjectPath};
+use project::{search::SearchQuery, Project, ProjectPath, SearchResult};
 use rand::{
     distributions::{Alphanumeric, DistString},
     prelude::*,
@@ -832,7 +832,7 @@ impl RandomizedTest for ProjectCollaborationTest {
                         .boxed(),
                     LspRequestKind::CodeAction => project
                         .code_actions(&buffer, offset..offset, cx)
-                        .map_ok(|_| ())
+                        .map(|_| Ok(()))
                         .boxed(),
                     LspRequestKind::Definition => project
                         .definition(&buffer, offset, cx)
@@ -879,8 +879,10 @@ impl RandomizedTest for ProjectCollaborationTest {
                 drop(project);
                 let search = cx.executor().spawn(async move {
                     let mut results = HashMap::default();
-                    while let Some((buffer, ranges)) = search.next().await {
-                        results.entry(buffer).or_insert(ranges);
+                    while let Some(result) = search.next().await {
+                        if let SearchResult::Buffer { buffer, ranges } = result {
+                            results.entry(buffer).or_insert(ranges);
+                        }
                     }
                     results
                 });
@@ -996,7 +998,7 @@ impl RandomizedTest for ProjectCollaborationTest {
 
                     let statuses = statuses
                         .iter()
-                        .map(|(path, val)| (path.as_path(), val.clone()))
+                        .map(|(path, val)| (path.as_path(), *val))
                         .collect::<Vec<_>>();
 
                     if client.fs().metadata(&dot_git_dir).await?.is_none() {
@@ -1483,10 +1485,10 @@ fn project_for_root_name(
     root_name: &str,
     cx: &TestAppContext,
 ) -> Option<Model<Project>> {
-    if let Some(ix) = project_ix_for_root_name(&*client.local_projects().deref(), root_name, cx) {
+    if let Some(ix) = project_ix_for_root_name(client.local_projects().deref(), root_name, cx) {
         return Some(client.local_projects()[ix].clone());
     }
-    if let Some(ix) = project_ix_for_root_name(&*client.remote_projects().deref(), root_name, cx) {
+    if let Some(ix) = project_ix_for_root_name(client.remote_projects().deref(), root_name, cx) {
         return Some(client.remote_projects()[ix].clone());
     }
     None

@@ -1,22 +1,23 @@
-use std::sync::{Arc, OnceLock};
-
+use super::ips_file::IpsFile;
+use crate::{api::slack, AppState, Error, Result};
 use anyhow::{anyhow, Context};
 use aws_sdk_s3::primitives::ByteStream;
 use axum::{
-    body::Bytes, headers::Header, http::HeaderName, routing::post, Extension, Router, TypedHeader,
+    body::Bytes,
+    headers::Header,
+    http::{HeaderMap, HeaderName, StatusCode},
+    routing::post,
+    Extension, Router, TypedHeader,
 };
-use hyper::{HeaderMap, StatusCode};
+use rpc::ExtensionMetadata;
+use semantic_version::SemanticVersion;
 use serde::{Serialize, Serializer};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, OnceLock};
 use telemetry_events::{
     ActionEvent, AppEvent, AssistantEvent, CallEvent, CopilotEvent, CpuEvent, EditEvent,
-    EditorEvent, Event, EventRequestBody, EventWrapper, MemoryEvent, SettingEvent,
+    EditorEvent, Event, EventRequestBody, EventWrapper, ExtensionEvent, MemoryEvent, SettingEvent,
 };
-use util::SemanticVersion;
-
-use crate::{api::slack, AppState, Error, Result};
-
-use super::ips_file::IpsFile;
 
 pub fn router() -> Router {
     Router::new()
@@ -81,8 +82,8 @@ impl Header for CloudflareIpCountryHeader {
 
 pub async fn post_crash(
     Extension(app): Extension<Arc<AppState>>,
-    body: Bytes,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Result<()> {
     static CRASH_REPORTS_BUCKET: &str = "zed-crash-reports";
 
@@ -328,6 +329,21 @@ pub async fn post_events(
                 &request_body,
                 first_event_at,
             )),
+            Event::Extension(event) => {
+                let metadata = app
+                    .db
+                    .get_extension_version(&event.extension_id, &event.version)
+                    .await?;
+                to_upload
+                    .extension_events
+                    .push(ExtensionEventRow::from_event(
+                        event.clone(),
+                        &wrapper,
+                        &request_body,
+                        metadata,
+                        first_event_at,
+                    ))
+            }
         }
     }
 
@@ -349,46 +365,84 @@ struct ToUpload {
     memory_events: Vec<MemoryEventRow>,
     app_events: Vec<AppEventRow>,
     setting_events: Vec<SettingEventRow>,
+    extension_events: Vec<ExtensionEventRow>,
     edit_events: Vec<EditEventRow>,
     action_events: Vec<ActionEventRow>,
 }
 
 impl ToUpload {
     pub async fn upload(&self, clickhouse_client: &clickhouse::Client) -> anyhow::Result<()> {
-        Self::upload_to_table("editor_events", &self.editor_events, clickhouse_client)
+        const EDITOR_EVENTS_TABLE: &str = "editor_events";
+        Self::upload_to_table(EDITOR_EVENTS_TABLE, &self.editor_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'editor_events'"))?;
-        Self::upload_to_table("copilot_events", &self.copilot_events, clickhouse_client)
-            .await
-            .with_context(|| format!("failed to upload to table 'copilot_events'"))?;
+            .with_context(|| format!("failed to upload to table '{EDITOR_EVENTS_TABLE}'"))?;
+
+        const COPILOT_EVENTS_TABLE: &str = "copilot_events";
         Self::upload_to_table(
-            "assistant_events",
+            COPILOT_EVENTS_TABLE,
+            &self.copilot_events,
+            clickhouse_client,
+        )
+        .await
+        .with_context(|| format!("failed to upload to table '{COPILOT_EVENTS_TABLE}'"))?;
+
+        const ASSISTANT_EVENTS_TABLE: &str = "assistant_events";
+        Self::upload_to_table(
+            ASSISTANT_EVENTS_TABLE,
             &self.assistant_events,
             clickhouse_client,
         )
         .await
-        .with_context(|| format!("failed to upload to table 'assistant_events'"))?;
-        Self::upload_to_table("call_events", &self.call_events, clickhouse_client)
+        .with_context(|| format!("failed to upload to table '{ASSISTANT_EVENTS_TABLE}'"))?;
+
+        const CALL_EVENTS_TABLE: &str = "call_events";
+        Self::upload_to_table(CALL_EVENTS_TABLE, &self.call_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'call_events'"))?;
-        Self::upload_to_table("cpu_events", &self.cpu_events, clickhouse_client)
+            .with_context(|| format!("failed to upload to table '{CALL_EVENTS_TABLE}'"))?;
+
+        const CPU_EVENTS_TABLE: &str = "cpu_events";
+        Self::upload_to_table(CPU_EVENTS_TABLE, &self.cpu_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'cpu_events'"))?;
-        Self::upload_to_table("memory_events", &self.memory_events, clickhouse_client)
+            .with_context(|| format!("failed to upload to table '{CPU_EVENTS_TABLE}'"))?;
+
+        const MEMORY_EVENTS_TABLE: &str = "memory_events";
+        Self::upload_to_table(MEMORY_EVENTS_TABLE, &self.memory_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'memory_events'"))?;
-        Self::upload_to_table("app_events", &self.app_events, clickhouse_client)
+            .with_context(|| format!("failed to upload to table '{MEMORY_EVENTS_TABLE}'"))?;
+
+        const APP_EVENTS_TABLE: &str = "app_events";
+        Self::upload_to_table(APP_EVENTS_TABLE, &self.app_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'app_events'"))?;
-        Self::upload_to_table("setting_events", &self.setting_events, clickhouse_client)
+            .with_context(|| format!("failed to upload to table '{APP_EVENTS_TABLE}'"))?;
+
+        const SETTING_EVENTS_TABLE: &str = "setting_events";
+        Self::upload_to_table(
+            SETTING_EVENTS_TABLE,
+            &self.setting_events,
+            clickhouse_client,
+        )
+        .await
+        .with_context(|| format!("failed to upload to table '{SETTING_EVENTS_TABLE}'"))?;
+
+        const EXTENSION_EVENTS_TABLE: &str = "extension_events";
+        Self::upload_to_table(
+            EXTENSION_EVENTS_TABLE,
+            &self.extension_events,
+            clickhouse_client,
+        )
+        .await
+        .with_context(|| format!("failed to upload to table '{EXTENSION_EVENTS_TABLE}'"))?;
+
+        const EDIT_EVENTS_TABLE: &str = "edit_events";
+        Self::upload_to_table(EDIT_EVENTS_TABLE, &self.edit_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'setting_events'"))?;
-        Self::upload_to_table("edit_events", &self.edit_events, clickhouse_client)
+            .with_context(|| format!("failed to upload to table '{EDIT_EVENTS_TABLE}'"))?;
+
+        const ACTION_EVENTS_TABLE: &str = "action_events";
+        Self::upload_to_table(ACTION_EVENTS_TABLE, &self.action_events, clickhouse_client)
             .await
-            .with_context(|| format!("failed to upload to table 'edit_events'"))?;
-        Self::upload_to_table("action_events", &self.action_events, clickhouse_client)
-            .await
-            .with_context(|| format!("failed to upload to table 'action_events'"))?;
+            .with_context(|| format!("failed to upload to table '{ACTION_EVENTS_TABLE}'"))?;
+
         Ok(())
     }
 
@@ -405,6 +459,12 @@ impl ToUpload {
             }
 
             insert.end().await?;
+
+            let event_count = rows.len();
+            log::info!(
+                "wrote {event_count} {event_specifier} to '{table}'",
+                event_specifier = if event_count == 1 { "event" } else { "events" }
+            );
         }
 
         Ok(())
@@ -468,9 +528,9 @@ impl EditorEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             os_name: body.os_name.clone(),
             os_version: body.os_version.clone().unwrap_or_default(),
@@ -530,9 +590,9 @@ impl CopilotEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             os_name: body.os_name.clone(),
             os_version: body.os_version.clone().unwrap_or_default(),
@@ -585,9 +645,9 @@ impl CallEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone().unwrap_or_default(),
             session_id: body.session_id.clone(),
@@ -634,9 +694,9 @@ impl AssistantEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),
@@ -678,9 +738,9 @@ impl CpuEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),
@@ -725,9 +785,9 @@ impl MemoryEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),
@@ -771,9 +831,9 @@ impl AppEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),
@@ -816,9 +876,9 @@ impl SettingEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),
@@ -826,6 +886,68 @@ impl SettingEventRow {
             time: time.timestamp_millis(),
             setting: event.setting,
             value: event.value,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, clickhouse::Row)]
+pub struct ExtensionEventRow {
+    // AppInfoBase
+    app_version: String,
+    major: Option<i32>,
+    minor: Option<i32>,
+    patch: Option<i32>,
+    release_channel: String,
+
+    // ClientEventBase
+    installation_id: Option<String>,
+    session_id: Option<String>,
+    is_staff: Option<bool>,
+    time: i64,
+
+    // ExtensionEventRow
+    extension_id: Arc<str>,
+    extension_version: Arc<str>,
+    dev: bool,
+    schema_version: Option<i32>,
+    wasm_api_version: Option<String>,
+}
+
+impl ExtensionEventRow {
+    fn from_event(
+        event: ExtensionEvent,
+        wrapper: &EventWrapper,
+        body: &EventRequestBody,
+        extension_metadata: Option<ExtensionMetadata>,
+        first_event_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let semver = body.semver();
+        let time =
+            first_event_at + chrono::Duration::milliseconds(wrapper.milliseconds_since_first_event);
+
+        Self {
+            app_version: body.app_version.clone(),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
+            release_channel: body.release_channel.clone().unwrap_or_default(),
+            installation_id: body.installation_id.clone(),
+            session_id: body.session_id.clone(),
+            is_staff: body.is_staff,
+            time: time.timestamp_millis(),
+            extension_id: event.extension_id,
+            extension_version: event.version,
+            dev: extension_metadata.is_none(),
+            schema_version: extension_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.manifest.schema_version),
+            wasm_api_version: extension_metadata.as_ref().and_then(|metadata| {
+                metadata
+                    .manifest
+                    .wasm_api_version
+                    .as_ref()
+                    .map(|version| version.to_string())
+            }),
         }
     }
 }
@@ -869,9 +991,9 @@ impl EditEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),
@@ -918,9 +1040,9 @@ impl ActionEventRow {
 
         Self {
             app_version: body.app_version.clone(),
-            major: semver.map(|s| s.major as i32),
-            minor: semver.map(|s| s.minor as i32),
-            patch: semver.map(|s| s.patch as i32),
+            major: semver.map(|v| v.major() as i32),
+            minor: semver.map(|v| v.minor() as i32),
+            patch: semver.map(|v| v.patch() as i32),
             release_channel: body.release_channel.clone().unwrap_or_default(),
             installation_id: body.installation_id.clone(),
             session_id: body.session_id.clone(),

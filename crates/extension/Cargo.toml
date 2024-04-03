@@ -5,18 +5,20 @@ edition = "2021"
 publish = false
 license = "GPL-3.0-or-later"
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/extension_store.rs"
-
-[[bin]]
-name = "extension_json_schemas"
-path = "src/extension_json_schemas.rs"
+doctest = false
 
 [dependencies]
 anyhow.workspace = true
 async-compression.workspace = true
 async-tar.workspace = true
 async-trait.workspace = true
+cap-std.workspace = true
+client.workspace = true
 collections.workspace = true
 fs.workspace = true
 futures.workspace = true
@@ -27,17 +29,27 @@ lsp.workspace = true
 node_runtime.workspace = true
 project.workspace = true
 schemars.workspace = true
+semantic_version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 theme.workspace = true
 toml.workspace = true
+url.workspace = true
 util.workspace = true
-wasmtime = { workspace = true, features = ["async"] }
+wasm-encoder.workspace = true
+wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 wasmparser.workspace = true
+wit-component.workspace = true
+task.workspace = true
+serde_json_lenient.workspace = true
 
 [dev-dependencies]
+ctor.workspace = true
+env_logger.workspace = true
+parking_lot.workspace = true
+
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }

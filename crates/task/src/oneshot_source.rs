@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::{SpawnInTerminal, Task, TaskId, TaskSource};
+use crate::{
+    static_source::RevealStrategy, SpawnInTerminal, Task, TaskContext, TaskId, TaskSource,
+};
 use gpui::{AppContext, Context, Model};
 
 /// A storage and source of tasks generated out of user command prompt inputs.
@@ -30,24 +32,28 @@ impl Task for OneshotTask {
         &self.id.0
     }
 
-    fn cwd(&self) -> Option<&std::path::Path> {
+    fn cwd(&self) -> Option<&str> {
         None
     }
 
-    fn exec(&self, cwd: Option<std::path::PathBuf>) -> Option<SpawnInTerminal> {
+    fn exec(&self, cx: TaskContext) -> Option<SpawnInTerminal> {
         if self.id().0.is_empty() {
             return None;
         }
+        let TaskContext {
+            cwd,
+            task_variables,
+        } = cx;
         Some(SpawnInTerminal {
             id: self.id().clone(),
             label: self.name().to_owned(),
             command: self.id().0.clone(),
             args: vec![],
             cwd,
-            env: Default::default(),
+            env: task_variables.0,
             use_new_terminal: Default::default(),
             allow_concurrent_runs: Default::default(),
-            separate_shell: true,
+            reveal: RevealStrategy::default(),
         })
     }
 }
@@ -60,9 +66,21 @@ impl OneshotSource {
 
     /// Spawns a certain task based on the user prompt.
     pub fn spawn(&mut self, prompt: String) -> Arc<dyn Task> {
-        let ret = Arc::new(OneshotTask::new(prompt));
-        self.tasks.push(ret.clone());
-        ret
+        if let Some(task) = self.tasks.iter().find(|task| task.id().0 == prompt) {
+            // If we already have an oneshot task with that command, let's just reuse it.
+            task.clone()
+        } else {
+            let new_oneshot = Arc::new(OneshotTask::new(prompt));
+            self.tasks.push(new_oneshot.clone());
+            new_oneshot
+        }
+    }
+    /// Removes a task with a given ID from this source.
+    pub fn remove(&mut self, id: &TaskId) {
+        let position = self.tasks.iter().position(|task| task.id() == id);
+        if let Some(position) = position {
+            self.tasks.remove(position);
+        }
     }
 }
 

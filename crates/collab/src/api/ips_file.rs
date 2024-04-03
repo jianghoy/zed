@@ -1,9 +1,8 @@
 use collections::HashMap;
 
-use serde_derive::Deserialize;
-use serde_derive::Serialize;
+use semantic_version::SemanticVersion;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use util::SemanticVersion;
 
 #[derive(Debug)]
 pub struct IpsFile {
@@ -45,7 +44,7 @@ impl IpsFile {
     pub fn description(&self, panic: Option<&str>) -> String {
         let mut desc = if self.body.termination.indicator == "Abort trap: 6" {
             match panic {
-                Some(panic_message) => format!("Panic `{}`", panic_message).into(),
+                Some(panic_message) => format!("Panic `{}`", panic_message),
                 None => "Crash `Abort trap: 6` (possible panic)".into(),
             }
         } else if let Some(msg) = &self.body.exception.message {

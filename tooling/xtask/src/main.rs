@@ -26,42 +26,46 @@ fn main() -> Result<()> {
 
 #[derive(Parser)]
 struct ClippyArgs {
-    /// Whether to deny warnings (`clippy --deny warnings`).
+    /// Automatically apply lint suggestions (`clippy --fix`).
     #[arg(long)]
-    deny_warnings: bool,
+    fix: bool,
+
+    /// The package to run Clippy against (`cargo -p <PACKAGE> clippy`).
+    #[arg(long, short)]
+    package: Option<String>,
 }
 
 fn run_clippy(args: ClippyArgs) -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
 
     let mut clippy_command = Command::new(&cargo);
+    clippy_command.arg("clippy");
+
+    if let Some(package) = args.package.as_ref() {
+        clippy_command.args(["--package", package]);
+    } else {
+        clippy_command.arg("--workspace");
+    }
+
     clippy_command
-        .arg("clippy")
-        .arg("--workspace")
         .arg("--release")
         .arg("--all-targets")
         .arg("--all-features");
 
-    clippy_command.arg("--");
-
-    if args.deny_warnings {
-        clippy_command.args(["--deny", "warnings"]);
+    if args.fix {
+        clippy_command.arg("--fix");
     }
 
-    // Allow all Clippy lints by default, as we have a lot of violations at the moment.
-    // We can tighten things up once we have a better handle on them.
-    clippy_command.args(["--allow", "clippy::all"]);
+    clippy_command.arg("--");
 
-    // Deny `dbg!` and `todo!`s.
-    clippy_command
-        .args(["--deny", "clippy::dbg_macro"])
-        .args(["--deny", "clippy::todo"]);
+    // Deny all warnings.
+    clippy_command.args(["--deny", "warnings"]);
 
     eprintln!(
         "running: {cargo} {}",
         clippy_command
             .get_args()
-            .map(|arg| format!("{}", arg.to_str().unwrap()))
+            .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>()
             .join(" ")
     );

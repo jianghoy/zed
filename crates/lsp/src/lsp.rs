@@ -15,6 +15,10 @@ use smol::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{self, Child},
 };
+
+#[cfg(target_os = "windows")]
+use smol::process::windows::CommandExt;
+
 use std::{
     ffi::OsString,
     fmt,
@@ -215,21 +219,24 @@ impl LanguageServer {
             &binary.arguments
         );
 
-        let mut server = process::Command::new(&binary.path)
+        let mut command = process::Command::new(&binary.path);
+        command
             .current_dir(working_dir)
             .args(binary.arguments)
             .envs(binary.env.unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+        let mut server = command.spawn()?;
 
         let stdin = server.stdin.take().unwrap();
         let stdout = server.stdout.take().unwrap();
         let stderr = server.stderr.take().unwrap();
         let mut server = Self::new_internal(
-            server_id.clone(),
+            server_id,
             stdin,
             stdout,
             Some(stderr),
@@ -261,6 +268,7 @@ impl LanguageServer {
         Ok(server)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_internal<Stdin, Stdout, Stderr, F>(
         server_id: LanguageServerId,
         stdin: Stdin,
@@ -340,7 +348,7 @@ impl LanguageServer {
             io_tasks: Mutex::new(Some((input_task, output_task))),
             output_done_rx: Mutex::new(Some(output_done_rx)),
             root_path: root_path.to_path_buf(),
-            server: Arc::new(Mutex::new(server.map(|server| server))),
+            server: Arc::new(Mutex::new(server)),
         }
     }
 
@@ -377,7 +385,7 @@ impl LanguageServer {
             let headers = std::str::from_utf8(&buffer)?;
 
             let message_len = headers
-                .split("\n")
+                .split('\n')
                 .find(|line| line.starts_with(CONTENT_LEN_HEADER))
                 .and_then(|line| line.strip_prefix(CONTENT_LEN_HEADER))
                 .ok_or_else(|| anyhow!("invalid LSP message header {headers:?}"))?
@@ -569,7 +577,14 @@ impl LanguageServer {
                         }),
                         data_support: Some(true),
                         resolve_support: Some(CodeActionCapabilityResolveSupport {
-                            properties: vec!["edit".to_string(), "command".to_string()],
+                            properties: vec![
+                                "kind".to_string(),
+                                "diagnostics".to_string(),
+                                "isPreferred".to_string(),
+                                "disabled".to_string(),
+                                "edit".to_string(),
+                                "command".to_string(),
+                            ],
                         }),
                         ..Default::default()
                     }),
@@ -582,6 +597,7 @@ impl LanguageServer {
                                     "additionalTextEdits".to_string(),
                                 ],
                             }),
+                            insert_replace_support: Some(true),
                             ..Default::default()
                         }),
                         completion_list: Some(CompletionListCapability {
@@ -977,7 +993,7 @@ impl LanguageServer {
                     Self::notify_internal::<notification::Cancel>(
                         &outbound_tx,
                         CancelParams {
-                            id: NumberOrString::Number(id as i32),
+                            id: NumberOrString::Number(id),
                         },
                     )
                     .log_err();
@@ -1092,6 +1108,7 @@ pub struct FakeLanguageServer {
 impl FakeLanguageServer {
     /// Construct a fake language server.
     pub fn new(
+        server_id: LanguageServerId,
         binary: LanguageServerBinary,
         name: String,
         capabilities: ServerCapabilities,
@@ -1101,8 +1118,8 @@ impl FakeLanguageServer {
         let (stdout_writer, stdout_reader) = async_pipe::pipe();
         let (notifications_tx, notifications_rx) = channel::unbounded();
 
-        let server = LanguageServer::new_internal(
-            LanguageServerId(0),
+        let mut server = LanguageServer::new_internal(
+            server_id,
             stdin_writer,
             stdout_reader,
             None::<async_pipe::PipeReader>,
@@ -1113,30 +1130,35 @@ impl FakeLanguageServer {
             cx.clone(),
             |_| {},
         );
+        server.name = name.as_str().into();
         let fake = FakeLanguageServer {
             binary,
-            server: Arc::new(LanguageServer::new_internal(
-                LanguageServerId(0),
-                stdout_writer,
-                stdin_reader,
-                None::<async_pipe::PipeReader>,
-                Arc::new(Mutex::new(None)),
-                None,
-                Path::new("/"),
-                None,
-                cx,
-                move |msg| {
-                    notifications_tx
-                        .try_send((
-                            msg.method.to_string(),
-                            msg.params
-                                .map(|raw_value| raw_value.get())
-                                .unwrap_or("null")
-                                .to_string(),
-                        ))
-                        .ok();
-                },
-            )),
+            server: Arc::new({
+                let mut server = LanguageServer::new_internal(
+                    server_id,
+                    stdout_writer,
+                    stdin_reader,
+                    None::<async_pipe::PipeReader>,
+                    Arc::new(Mutex::new(None)),
+                    None,
+                    Path::new("/"),
+                    None,
+                    cx,
+                    move |msg| {
+                        notifications_tx
+                            .try_send((
+                                msg.method.to_string(),
+                                msg.params
+                                    .map(|raw_value| raw_value.get())
+                                    .unwrap_or("null")
+                                    .to_string(),
+                            ))
+                            .ok();
+                    },
+                );
+                server.name = name.as_str().into();
+                server
+            }),
             notifications_rx,
         };
         fake.handle_request::<request::Initialize, _, _>({
@@ -1334,6 +1356,7 @@ mod tests {
             release_channel::init("0.0.0", cx);
         });
         let (server, mut fake) = FakeLanguageServer::new(
+            LanguageServerId(0),
             LanguageServerBinary {
                 path: "path/to/language-server".into(),
                 arguments: vec![],

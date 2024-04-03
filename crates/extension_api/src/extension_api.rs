@@ -1,6 +1,4 @@
-pub struct Guest;
 pub use wit::*;
-
 pub type Result<T, E = String> = core::result::Result<T, E>;
 
 pub trait Extension: Send + Sync {
@@ -10,9 +8,17 @@ pub trait Extension: Send + Sync {
 
     fn language_server_command(
         &mut self,
-        config: wit::LanguageServerConfig,
-        worktree: &wit::Worktree,
+        config: LanguageServerConfig,
+        worktree: &Worktree,
     ) -> Result<Command>;
+
+    fn language_server_initialization_options(
+        &mut self,
+        _config: LanguageServerConfig,
+        _worktree: &Worktree,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 #[macro_export]
@@ -20,6 +26,7 @@ macro_rules! register_extension {
     ($extension_type:ty) => {
         #[export_name = "init-extension"]
         pub extern "C" fn __init_extension() {
+            std::env::set_current_dir(std::env::var("PWD").unwrap()).unwrap();
             zed_extension_api::register_extension(|| {
                 Box::new(<$extension_type as zed_extension_api::Extension>::new())
             });
@@ -45,10 +52,12 @@ pub static ZED_API_VERSION: [u8; 6] = *include_bytes!(concat!(env!("OUT_DIR"), "
 
 mod wit {
     wit_bindgen::generate!({
-        exports: { world: super::Component },
-        skip: ["init-extension"]
+        skip: ["init-extension"],
+        path: "./wit/since_v0.0.4",
     });
 }
+
+wit::export!(Component);
 
 struct Component;
 
@@ -58,5 +67,12 @@ impl wit::Guest for Component {
         worktree: &wit::Worktree,
     ) -> Result<wit::Command> {
         extension().language_server_command(config, worktree)
+    }
+
+    fn language_server_initialization_options(
+        config: LanguageServerConfig,
+        worktree: &Worktree,
+    ) -> Result<Option<String>, String> {
+        extension().language_server_initialization_options(config, worktree)
     }
 }
