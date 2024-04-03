@@ -5,9 +5,12 @@ edition = "2021"
 publish = false
 license = "GPL-3.0-or-later"
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/telemetry_events.rs"
 
 [dependencies]
+semantic_version.workspace = true
 serde.workspace = true
-util.workspace = true

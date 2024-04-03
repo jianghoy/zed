@@ -9,7 +9,8 @@ use gpui::{
 };
 use indoc::indoc;
 use itertools::Itertools;
-use language::{Buffer, BufferSnapshot};
+use language::{Buffer, BufferSnapshot, LanguageRegistry};
+use multi_buffer::ExcerptRange;
 use parking_lot::RwLock;
 use project::{FakeFs, Project};
 use std::{
@@ -20,12 +21,14 @@ use std::{
         Arc,
     },
 };
+use text::BufferId;
+use ui::Context;
 use util::{
     assert_set_eq,
     test::{generate_marked_text, marked_text_ranges},
 };
 
-use super::build_editor_with_project;
+use super::{build_editor, build_editor_with_project};
 
 pub struct EditorTestContext {
     pub cx: gpui::VisualTestContext,
@@ -58,6 +61,43 @@ impl EditorTestContext {
             editor.focus(cx);
             editor
         });
+        let editor_view = editor.root_view(cx).unwrap();
+        Self {
+            cx: VisualTestContext::from_window(*editor.deref(), cx),
+            window: editor.into(),
+            editor: editor_view,
+            assertion_cx: AssertionContextManager::new(),
+        }
+    }
+
+    pub fn new_multibuffer<const COUNT: usize>(
+        cx: &mut gpui::TestAppContext,
+        excerpts: [&str; COUNT],
+    ) -> EditorTestContext {
+        let mut multibuffer = MultiBuffer::new(0, language::Capability::ReadWrite);
+        let buffer = cx.new_model(|cx| {
+            for (i, excerpt) in excerpts.into_iter().enumerate() {
+                let (text, ranges) = marked_text_ranges(excerpt, false);
+                let buffer =
+                    cx.new_model(|_| Buffer::new(0, BufferId::new(i as u64 + 1).unwrap(), text));
+                multibuffer.push_excerpts(
+                    buffer,
+                    ranges.into_iter().map(|range| ExcerptRange {
+                        context: range,
+                        primary: None,
+                    }),
+                    cx,
+                );
+            }
+            multibuffer
+        });
+
+        let editor = cx.add_window(|cx| {
+            let editor = build_editor(buffer, cx);
+            editor.focus(cx);
+            editor
+        });
+
         let editor_view = editor.root_view(cx).unwrap();
         Self {
             cx: VisualTestContext::from_window(*editor.deref(), cx),
@@ -117,6 +157,18 @@ impl EditorTestContext {
         self.multibuffer(|multibuffer, cx| {
             let buffer = multibuffer.as_singleton().unwrap().read(cx);
             read(buffer, cx)
+        })
+    }
+
+    pub fn language_registry(&mut self) -> Arc<LanguageRegistry> {
+        self.editor(|editor, cx| {
+            editor
+                .project
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .languages()
+                .clone()
         })
     }
 
@@ -236,7 +288,7 @@ impl EditorTestContext {
     pub fn set_state(&mut self, marked_text: &str) -> ContextHandle {
         let state_context = self.add_assertion_context(format!(
             "Initial Editor State: \"{}\"",
-            marked_text.escape_debug().to_string()
+            marked_text.escape_debug()
         ));
         let (unmarked_text, selection_ranges) = marked_text_ranges(marked_text, true);
         self.editor.update(&mut self.cx, |editor, cx| {
@@ -252,7 +304,7 @@ impl EditorTestContext {
     pub fn set_selections_state(&mut self, marked_text: &str) -> ContextHandle {
         let state_context = self.add_assertion_context(format!(
             "Initial Editor State: \"{}\"",
-            marked_text.escape_debug().to_string()
+            marked_text.escape_debug()
         ));
         let (unmarked_text, selection_ranges) = marked_text_ranges(marked_text, true);
         self.editor.update(&mut self.cx, |editor, cx| {
@@ -274,7 +326,7 @@ impl EditorTestContext {
         let buffer_text = self.buffer_text();
 
         if buffer_text != unmarked_text {
-            panic!("Unmarked text doesn't match buffer text\nBuffer text: {buffer_text:?}\nUnmarked text: {unmarked_text:?}\nRaw buffer text\n{buffer_text}Raw unmarked text\n{unmarked_text}");
+            panic!("Unmarked text doesn't match buffer text\nBuffer text: {buffer_text:?}\nUnmarked text: {unmarked_text:?}\nRaw buffer text\n{buffer_text}\nRaw unmarked text\n{unmarked_text}");
         }
 
         self.assert_selections(expected_selections, marked_text.to_string())
