@@ -21,7 +21,6 @@ use std::{
         Arc,
     },
 };
-use text::BufferId;
 use ui::Context;
 use util::{
     assert_set_eq,
@@ -76,10 +75,9 @@ impl EditorTestContext {
     ) -> EditorTestContext {
         let mut multibuffer = MultiBuffer::new(0, language::Capability::ReadWrite);
         let buffer = cx.new_model(|cx| {
-            for (i, excerpt) in excerpts.into_iter().enumerate() {
+            for excerpt in excerpts.into_iter() {
                 let (text, ranges) = marked_text_ranges(excerpt, false);
-                let buffer =
-                    cx.new_model(|_| Buffer::new(0, BufferId::new(i as u64 + 1).unwrap(), text));
+                let buffer = cx.new_model(|cx| Buffer::local(text, cx));
                 multibuffer.push_excerpts(
                     buffer,
                     ranges.into_iter().map(|range| ExcerptRange {
@@ -345,7 +343,7 @@ impl EditorTestContext {
                 .background_highlights
                 .get(&TypeId::of::<Tag>())
                 .map(|h| h.1.clone())
-                .unwrap_or_default()
+                .unwrap_or_else(|| Arc::from([]))
                 .into_iter()
                 .map(|range| range.to_offset(&snapshot.buffer_snapshot))
                 .collect()
