@@ -1,6 +1,8 @@
 # Contributing to Zed
 
 Thanks for your interest in contributing to Zed, the collaborative platform that is also a code editor!
+When $a \ne 0$, there are two solutions to $(ax^2 + bx + c = 0)$ and they are
+$$ x = {-b \pm \sqrt{b^2-4ac} \over 2a} $$
 
 All activity in Zed forums is subject to our [Code of Conduct](https://zed.dev/docs/code-of-conduct). Additionally, contributors must sign our [Contributor License Agreement](https://zed.dev/cla) before their contributions can be merged.
 

@@ -775,6 +775,7 @@ impl EditorElement {
         (selections, active_rows, newest_selection_head)
     }
 
+    // how currently it folds it must be.
     #[allow(clippy::too_many_arguments)]
     fn layout_folds(
         &self,
@@ -1391,6 +1392,7 @@ impl EditorElement {
         }
     }
 
+    // this must be where multibuffer is invoked.
     #[allow(clippy::too_many_arguments)]
     fn build_blocks(
         &self,
@@ -1414,6 +1416,13 @@ impl EditorElement {
                 TransformBlock::Custom(block) => block.style() == BlockStyle::Fixed,
             });
 
+        // this gnaring big chunck of code is where rendering happens, which makes sense
+        // turns out this huge chunk of code is a function, silly me
+        // meaning where this got invoked is where it got called multiple times, so
+        // blocks has a list of block. OK I guess my question is blocks a list of all blocks
+        // meaning all file search results end up in the same block? Or not, meaning one file
+        // with many excerpts end up in the same blocks?
+        // TODO: read code here!
         let render_block = |block: &TransformBlock,
                             available_space: Size<AvailableSpace>,
                             block_id: usize,
@@ -1506,6 +1515,7 @@ impl EditorElement {
                         }
                     });
 
+                    // this is the header of file, e.g.
                     let element = if *starts_new_buffer {
                         let path = buffer.resolve_file_path(cx, include_root);
                         let mut filename = None;
@@ -1566,6 +1576,7 @@ impl EditorElement {
                                             .on_mouse_down(MouseButton::Left, |_, cx| {
                                                 cx.stop_propagation()
                                             })
+                                            // this is how it jump to file.
                                             .on_click(cx.listener_for(&self.editor, {
                                                 move |editor, _, cx| {
                                                     editor.jump(
@@ -1580,6 +1591,7 @@ impl EditorElement {
                                     }),
                             )
                     } else {
+                        // wait this look like how it jump to to the file>?
                         v_flex()
                             .id(("collapsed context", block_id))
                             .size_full()
@@ -3799,6 +3811,7 @@ impl IntoElement for EditorElement {
 
 type BufferRow = u32;
 
+// this must be where buffer is rendered
 pub struct EditorLayout {
     position_map: Arc<PositionMap>,
     hitbox: Hitbox,
