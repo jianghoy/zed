@@ -114,6 +114,9 @@ impl PaneGroup {
         )
     }
 
+    // how does it work?
+    // I think once you get panes you can determine which pane is the on focus pane?
+    // and then you can fold the rest pain?
     pub(crate) fn panes(&self) -> Vec<&View<Pane>> {
         let mut panes = Vec::new();
         self.root.collect_panes(&mut panes);
@@ -666,6 +669,7 @@ mod element {
             self
         }
 
+        // yeah this is how compute resize work
         #[allow(clippy::too_many_arguments)]
         fn compute_resize(
             flexes: &Arc<Mutex<Vec<f32>>>,
