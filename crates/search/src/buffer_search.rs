@@ -436,6 +436,7 @@ impl BufferSearchBar {
     pub fn register(registrar: &mut impl SearchActionsRegistrar) {
         registrar.register_handler(ForDeployed(|this, _: &FocusSearch, cx| {
             this.query_editor.focus_handle(cx).focus(cx);
+            this.select_query(cx);
         }));
         registrar.register_handler(ForDeployed(|this, action: &ToggleCaseSensitive, cx| {
             if this.supported_options().case {
@@ -1096,6 +1097,7 @@ mod tests {
     use editor::{DisplayPoint, Editor};
     use gpui::{Context, Hsla, TestAppContext, VisualTestContext};
     use language::Buffer;
+    use project::Project;
     use smol::stream::StreamExt as _;
     use unindent::Unindent as _;
 
@@ -1106,6 +1108,7 @@ mod tests {
             editor::init(cx);
 
             language::init(cx);
+            Project::init_settings(cx);
             theme::init(theme::LoadThemes::JustBase, cx);
         });
     }
